@@ -54,9 +54,57 @@ async function webSearch(query: string): Promise<string> {
   }
 }
 
+import ts from "typescript";
+
+// --- Type declarations for sandbox globals ---
+
+const SANDBOX_DECLARATIONS = `
+declare function log(msg: string): void;
+declare function finalAnswer(value: any): void;
+declare function webSearch(query: string): string;
+`;
+
+function typeCheckAndTranspile(code: string): { js: string | null; errors: string[] } {
+  const fullSource = SANDBOX_DECLARATIONS + code;
+  const fileName = "sandbox.ts";
+
+  const host = ts.createCompilerHost({ strict: true, target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext });
+  const originalGetSourceFile = host.getSourceFile;
+  host.getSourceFile = (name, languageVersion) => {
+    if (name === fileName) return ts.createSourceFile(name, fullSource, languageVersion);
+    return originalGetSourceFile.call(host, name, languageVersion);
+  };
+  host.fileExists = (name) => name === fileName || ts.sys.fileExists(name);
+  host.readFile = (name) => name === fileName ? fullSource : ts.sys.readFile(name);
+
+  const program = ts.createProgram([fileName], { strict: true, target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext, noEmit: true }, host);
+  const diagnostics = ts.getPreEmitDiagnostics(program).filter(d => d.file?.fileName === fileName);
+
+  if (diagnostics.length > 0) {
+    // Adjust line numbers to account for prepended declarations
+    const declLines = SANDBOX_DECLARATIONS.split("\n").length - 1;
+    const errors = diagnostics.map(d => {
+      const { line } = d.file!.getLineAndCharacterOfPosition(d.start!);
+      const msg = ts.flattenDiagnosticMessageText(d.messageText, "\n");
+      return `Line ${Math.max(1, line + 1 - declLines)}: ${msg}`;
+    });
+    return { js: null, errors };
+  }
+
+  // Transpile (strip types)
+  const { outputText } = ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext } });
+  return { js: outputText, errors: [] };
+}
+
 // --- Sandbox execution ---
 
 async function executeCode(code: string, { timeout = 60000, memoryLimit = 8 } = {}) {
+  // Type-check first
+  const { js, errors } = typeCheckAndTranspile(code);
+  if (errors.length > 0) {
+    return { success: false, error: "Type errors:\n" + errors.join("\n"), output: [], finalAnswer: false };
+  }
+
   const output: string[] = [];
   let finalAnswer: { called: boolean; value?: unknown } = { called: false };
   const isolate = new ivm.Isolate({ memoryLimit });
@@ -90,7 +138,7 @@ async function executeCode(code: string, { timeout = 60000, memoryLimit = 8 } = 
 
     // Run user code async so applySyncPromise can block the isolate thread
     // while the host thread resolves the search promise
-    const result = await context.eval(code, { timeout });
+    const result = await context.eval(js!, { timeout });
 
     return { success: true, result: finalAnswer.called ? finalAnswer.value : result, output, finalAnswer: finalAnswer.called };
   } catch (err: any) {

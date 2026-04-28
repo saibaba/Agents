@@ -61,30 +61,32 @@ function runInSandbox(code: string): Promise<{ success: boolean; result?: string
 
 // --- System prompt (smolagents-style) ---
 
-const SYSTEM_PROMPT = () => `You are an expert assistant who solves tasks by writing JavaScript code.
+const SYSTEM_PROMPT = () => `You are an expert assistant who solves tasks by writing TypeScript code.
 Today's date is ${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}.
 
 You proceed in a cycle of Thought, Code, and Observation steps.
 
 At each step:
 1. In 'Thought:', explain your reasoning and what you plan to do.
-2. In 'Code:', write JavaScript code inside \`\`\`js ... \`\`\` blocks.
-3. The code runs in a sandboxed V8 isolate. Use log() instead of console.log() to print output.
-4. Print outputs appear in the 'Observation:' field for your next step.
-5. When done, call finalAnswer(value) to return your result.
+2. In 'Code:', write TypeScript code inside \`\`\`ts ... \`\`\` blocks.
+3. The code is type-checked, then runs in a sandboxed V8 isolate. Use log() instead of console.log() to print output.
+4. If there are type errors, they will appear in the Observation for you to fix.
+5. Print outputs appear in the 'Observation:' field for your next step.
+6. When done, call finalAnswer(value) to return your result.
 
 Available sandbox APIs:
-- log(msg): prints a message (captured in Observation)
-- finalAnswer(value): returns the final result and stops execution
-- webSearch(query): searches the web via Google, returns text snippets
+- log(msg: string): prints a message (captured in Observation)
+- finalAnswer(value: any): returns the final result and stops execution
+- webSearch(query: string): string — searches the web via Google, returns text snippets
 
 Rules:
-- Always write Thought: then \`\`\`js ... \`\`\` code blocks.
+- Always write Thought: then \`\`\`ts ... \`\`\` code blocks.
+- Use type annotations where they add clarity.
 - Use log() for intermediate results you need in later steps.
 - State does NOT persist between steps — each code block runs in a fresh environment.
 - Use log() to capture values you need in later steps; they will appear in the Observation.
 - webSearch() is synchronous — just call it and use the result directly.
-- Do NOT use require(), import, fetch, or Node.js APIs — only pure JS + the sandbox APIs above.
+- Do NOT use require(), import, fetch, or Node.js APIs — only pure TS + the sandbox APIs above.
 - Don't give up. Solve the task, don't just describe how.
 
 Example:
@@ -92,8 +94,8 @@ Example:
 Task: "What are the first 8 fibonacci numbers?"
 
 Thought: I'll compute fibonacci numbers iteratively and return them.
-\`\`\`js
-const fib = [0, 1];
+\`\`\`ts
+const fib: number[] = [0, 1];
 for (let i = 2; i < 8; i++) fib.push(fib[i-1] + fib[i-2]);
 log('Fibonacci: ' + JSON.stringify(fib));
 finalAnswer(fib);
@@ -105,8 +107,8 @@ Now solve the task given to you.`;
 // --- Parse LLM output ---
 
 function parseResponse(text: string): { thought: string; code: string | null } {
-  const codeMatch = text.match(/```(?:js|javascript)\s*\n([\s\S]*?)```/);
-  const thought = text.replace(/```(?:js|javascript)\s*\n[\s\S]*?```/, "").trim();
+  const codeMatch = text.match(/```(?:ts|typescript|js|javascript)\s*\n([\s\S]*?)```/);
+  const thought = text.replace(/```(?:ts|typescript|js|javascript)\s*\n[\s\S]*?```/, "").trim();
   return { thought, code: codeMatch ? codeMatch[1].trim() : null };
 }
 
