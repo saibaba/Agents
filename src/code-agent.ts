@@ -7,7 +7,45 @@ import { spawn, type ChildProcess } from "child_process";
 
 const SANDBOX_URL = "http://localhost:3000/execute";
 const SANDBOX_SERVER = new URL("./sandbox-server.ts", import.meta.url).pathname;
-const MAX_STEPS = 6;
+const MAX_STEPS = 12;
+const PLANNING_INTERVAL = 5;
+
+// --- Planning prompts ---
+
+const INITIAL_PLAN_PROMPT = (task: string) => `You are a PLANNER, not a coder. Your job is to analyze and plan ONLY.
+
+You have been given this task:
+\`\`\`
+${task}
+\`\`\`
+
+Build a survey of facts and a plan. Respond ONLY with markdown headings and bullet points. NEVER write code blocks, function calls, or executable statements.
+
+## 1. Facts survey
+### 1.1. Facts given in the task
+### 1.2. Facts to look up
+### 1.3. Facts to derive
+
+## 2. Plan
+Write a step-by-step high-level plan using numbered steps.`;
+
+const UPDATE_PLAN_PROMPT = (task: string, remainingSteps: number) => `You are a PLANNER, not a coder. Your job is to review progress and revise the plan ONLY.
+
+The original task:
+\`\`\`
+${task}
+\`\`\`
+
+Based on the conversation history above, write an updated assessment. Respond ONLY with markdown headings and bullet points. NEVER write code blocks, function calls, or executable statements.
+
+## 1. Updated facts
+### 1.1. Facts given in the task
+### 1.2. Facts learned so far
+### 1.3. Facts still to look up
+### 1.4. Facts still to derive
+
+## 2. Updated plan
+You have ${remainingSteps} steps remaining. Write a revised step-by-step plan using numbered steps.`;
 
 // --- Sandbox server lifecycle ---
 
@@ -85,7 +123,8 @@ Rules:
 - Use log() for intermediate results you need in later steps.
 - State does NOT persist between steps — each code block runs in a fresh environment.
 - Use log() to capture values you need in later steps; they will appear in the Observation.
-- webSearch() is synchronous — just call it and use the result directly.
+- After calling webSearch(), log the result and STOP. Do NOT process or interpret search results in the same code block. Wait for the Observation, then use the results in the next step.
+- NEVER hardcode or assume data. Always use the actual results returned by webSearch().
 - Do NOT use require(), import, fetch, or Node.js APIs — only pure TS + the sandbox APIs above.
 - Don't give up. Solve the task, don't just describe how.
 
@@ -112,6 +151,33 @@ function parseResponse(text: string): { thought: string; code: string | null } {
   return { thought, code: codeMatch ? codeMatch[1].trim() : null };
 }
 
+// --- Planning ---
+
+async function runPlanningStep(task: string, step: number, messages: Message[]): Promise<void> {
+  const isFirst = step === 0;
+  console.log(chalk.blue(`\n── ${isFirst ? "Initial Plan" : "Updated Plan"} ──`));
+
+  const planPrompt = isFirst
+    ? INITIAL_PLAN_PROMPT(task)
+    : UPDATE_PLAN_PROMPT(task, MAX_STEPS - step);
+
+  // Build planning messages: full history + planning request
+  const planMessages: Message[] = [
+    ...messages,
+    { role: "user", content: planPrompt },
+  ];
+
+  const plan = await runLlmChat(planMessages);
+  console.log(chalk.blue(plan));
+
+  // Strip any code blocks the LLM may have generated despite instructions
+  const cleanPlan = plan.replace(/```[\s\S]*?```/g, "").trim();
+
+  // Inject the plan into the conversation so the agent can follow it
+  messages.push({ role: "assistant", content: cleanPlan });
+  messages.push({ role: "user", content: "Now proceed and carry out this plan." });
+}
+
 // --- Agent memory ---
 
 let messages: Message[] = [{ role: "system", content: SYSTEM_PROMPT() }];
@@ -122,7 +188,7 @@ function resetMemory() {
 
 // --- Agent loop ---
 
-async function runCodeAgent(task: string, reset = true): Promise<void> {
+async function runCodeAgent(task: string, reset = true, plan = false): Promise<void> {
   if (reset) resetMemory();
 
   const totalChars = messages.reduce((n, m) => n + (m.content?.length || 0), 0);
@@ -132,7 +198,16 @@ async function runCodeAgent(task: string, reset = true): Promise<void> {
 
   messages.push({ role: "user", content: `Task: "${task}"` });
 
+  // Initial planning step (only when requested with /plan)
+  if (plan) {
+    await runPlanningStep(task, 0, messages);
+  }
+
   for (let step = 0; step < MAX_STEPS; step++) {
+    // Periodic re-planning when the task is taking many steps
+    if (step > 0 && step % PLANNING_INTERVAL === 0) {
+      await runPlanningStep(task, step, messages);
+    }
     console.log(chalk.yellow(`\n--- Step ${step + 1}/${MAX_STEPS} ---`));
 
     const llmOutput = await runLlmChat(messages);
@@ -196,7 +271,10 @@ function prompt() {
       return;
     }
     try {
-      await runCodeAgent(input.trim(), nextReset);
+      const usePlan = input.startsWith("/plan ");
+      const task = usePlan ? input.slice(6).trim() : input.trim();
+      if (!task) { prompt(); return; }
+      await runCodeAgent(task, nextReset, usePlan);
       nextReset = false; // subsequent tasks keep memory
     } catch (e) {
       console.error(chalk.red("Error:"), e);
@@ -206,7 +284,7 @@ function prompt() {
 }
 
 console.log(chalk.yellow("--- Code Agent (smolagents-style) ---"));
-console.log(chalk.gray("Generates JS code → runs in V8 sandbox. Type '/reset' to clear memory, '/exit' to quit.\n"));
+console.log(chalk.gray("Generates TS code → runs in V8 sandbox. '/plan <task>' for complex tasks, '/reset' to clear memory, '/exit' to quit.\n"));
 
 await startSandbox();
 prompt();
