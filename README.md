@@ -133,6 +133,7 @@ This will:
 ### Commands
 
 - `/plan <task>` — run a task with an initial planning step (recommended for complex, multi-step tasks)
+- `/instructions <text>` — set custom instructions appended to the system prompt (e.g., `/instructions Always respond in French`). Resets memory.
 - `/reset` — clear conversation memory
 - `/exit` — quit (stops the sandbox server)
 
@@ -146,6 +147,30 @@ This will:
 ### Environment Variables
 
 - `CHROME_PATH` — path to Chrome binary (defaults to macOS location)
+
+## System Prompt Design
+
+### Few-shot examples
+
+The system prompt includes 4 worked examples covering different patterns:
+1. **Pure computation** — single step, no search, direct `finalAnswer`
+2. **Simple search** — search → log → stop → answer in next step
+3. **Search + computation** — search → log → stop → calculate from real data
+4. **Multi-value search + math** — search → log → stop → extract multiple values and compute
+
+Examples 2-4 reinforce the critical rule: search and stop, process in the next step.
+
+### Dynamic tool signatures
+
+Sandbox tools are defined in a `SANDBOX_TOOLS` array and rendered into the system prompt automatically. Adding a new tool requires only adding an entry to the array — no prompt editing needed.
+
+### Error recovery guidance
+
+When code execution fails, the observation includes retry guidance: *"This failed. Avoid repeating the same mistake — if this has failed before, try a fundamentally different approach."* This helps the agent break out of error loops.
+
+### Custom instructions
+
+The `/instructions` command appends user-defined instructions to the system prompt, allowing behavior customization without editing code (e.g., language preferences, output format requirements).
 
 ## Testing
 
@@ -228,6 +253,12 @@ Testing revealed a critical problem: the LLM would call `webSearch()` and hardco
 - "NEVER hardcode or assume data" — eliminates fabricated results
 
 Before/after testing confirmed the fix: the LLM now searches in step 1, processes real results in step 2.
+
+### v8: Anti-simulation rule
+
+Testing showed the LLM sometimes role-played entire Thought → Observation → Thought → Code sequences within a single response — simulating fake observations in its head before writing actual code. While the parser handled this correctly (it extracted the real code block), the fake observations wasted tokens and risked confusing the LLM in later steps if it mistook its own imagined observations for real ones.
+
+**Fix:** Added a rule: "NEVER simulate or imagine Observation outputs. Only the system provides Observations. Write one Thought and one code block, then stop."
 
 ### Code review findings
 

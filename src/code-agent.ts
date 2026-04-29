@@ -97,6 +97,14 @@ function runInSandbox(code: string): Promise<{ success: boolean; result?: string
   });
 }
 
+// --- Sandbox tool definitions ---
+
+const SANDBOX_TOOLS = [
+  { signature: "log(msg: string): void", description: "prints a message (captured in Observation)" },
+  { signature: "finalAnswer(value: any): void", description: "returns the final result and stops execution" },
+  { signature: "webSearch(query: string): string", description: "searches the web via Google, returns summarized results" },
+];
+
 // --- System prompt (smolagents-style) ---
 
 const SYSTEM_PROMPT = () => `You are an expert assistant who solves tasks by writing TypeScript code.
@@ -113,9 +121,7 @@ At each step:
 6. When done, call finalAnswer(value) to return your result.
 
 Available sandbox APIs:
-- log(msg: string): prints a message (captured in Observation)
-- finalAnswer(value: any): returns the final result and stops execution
-- webSearch(query: string): string — searches the web via Google, returns text snippets
+${SANDBOX_TOOLS.map(t => `- ${t.signature} — ${t.description}`).join("\n")}
 
 Rules:
 - Always write Thought: then \`\`\`ts ... \`\`\` code blocks.
@@ -125,10 +131,12 @@ Rules:
 - Use log() to capture values you need in later steps; they will appear in the Observation.
 - After calling webSearch(), log the result and STOP. Do NOT process or interpret search results in the same code block. Wait for the Observation, then use the results in the next step.
 - NEVER hardcode or assume data. Always use the actual results returned by webSearch().
+- NEVER simulate or imagine Observation outputs. Only the system provides Observations. Write one Thought and one code block, then stop.
 - Do NOT use require(), import, fetch, or Node.js APIs — only pure TS + the sandbox APIs above.
 - Don't give up. Solve the task, don't just describe how.
 
-Example:
+Here are examples using the available tools:
+
 ---
 Task: "What are the first 8 fibonacci numbers?"
 
@@ -140,8 +148,60 @@ log('Fibonacci: ' + JSON.stringify(fib));
 finalAnswer(fib);
 \`\`\`
 ---
+Task: "What is the population of Tokyo?"
 
-Now solve the task given to you.`;
+Thought: I need to search for this information. I'll search and log the result.
+\`\`\`ts
+const result: string = webSearch("Tokyo population");
+log(result);
+\`\`\`
+Observation: Tokyo has a population of approximately 13.96 million people as of 2024.
+
+Thought: I have the answer from the search results.
+\`\`\`ts
+finalAnswer("Tokyo has a population of approximately 13.96 million people.");
+\`\`\`
+---
+Task: "Which is taller, the Eiffel Tower or the Empire State Building, and by how much?"
+
+Thought: I need to search for the heights of both structures. I'll search and log the results.
+\`\`\`ts
+const results: string = webSearch("Eiffel Tower vs Empire State Building height meters");
+log(results);
+\`\`\`
+Observation: The Eiffel Tower is 330 meters tall. The Empire State Building is 443 meters tall.
+
+Thought: Now I can calculate the difference using the actual data from the search.
+\`\`\`ts
+const eiffel: number = 330;
+const empire: number = 443;
+const diff: number = empire - eiffel;
+log(\`Empire State Building is taller by \${diff} meters\`);
+finalAnswer(\`The Empire State Building (443m) is taller than the Eiffel Tower (330m) by \${diff} meters.\`);
+\`\`\`
+---
+Task: "Find the current price of Bitcoin and Ethereum, and calculate the BTC/ETH ratio."
+
+Thought: I'll search for current crypto prices first.
+\`\`\`ts
+const prices: string = webSearch("Bitcoin Ethereum price today USD");
+log(prices);
+\`\`\`
+Observation: Bitcoin is trading at $94,250 and Ethereum at $3,180.
+
+Thought: Now I'll calculate the ratio from the search results.
+\`\`\`ts
+const btc: number = 94250;
+const eth: number = 3180;
+const ratio: number = Math.round((btc / eth) * 100) / 100;
+log(\`BTC/ETH ratio: \${ratio}\`);
+finalAnswer(\`Bitcoin: $\${btc}, Ethereum: $\${eth}. The BTC/ETH ratio is \${ratio}.\`);
+\`\`\`
+---
+
+Now solve the task given to you.${customInstructions ? "\n\nAdditional instructions:\n" + customInstructions : ""}`;
+
+let customInstructions: string | null = null;
 
 // --- Parse LLM output ---
 
@@ -238,7 +298,7 @@ async function runCodeAgent(task: string, reset = true, plan = false): Promise<v
     const logs = result.output?.join("\n") || "";
     const observation = result.success
       ? `${logs}${result.result != null ? "\nResult: " + result.result : ""}`
-      : `Error: ${result.error}\n${logs}`;
+      : `Error: ${result.error}\n${logs}\nThis failed. Avoid repeating the same mistake — if this has failed before, try a fundamentally different approach.`;
 
     console.log(chalk.gray("Observation:"), observation);
 
@@ -267,6 +327,14 @@ function prompt() {
       resetMemory();
       nextReset = true;
       console.log(chalk.yellow("[Memory reset]"));
+      prompt();
+      return;
+    }
+    if (input.startsWith("/instructions ")) {
+      customInstructions = input.slice(14).trim() || null;
+      resetMemory();
+      nextReset = true;
+      console.log(chalk.yellow(customInstructions ? `[Instructions set: "${customInstructions}"]` : "[Instructions cleared]"));
       prompt();
       return;
     }
