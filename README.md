@@ -126,6 +126,12 @@ export CHROME_PATH=/usr/bin/google-chrome  # Linux example
 bun src/code-agent.ts
 ```
 
+To use a different port (default is 3000):
+
+```bash
+bun src/code-agent.ts --port=3001
+```
+
 This will:
 1. Start the V8 sandbox server (via Node.js, on port 3000)
 2. Launch the REPL — type a task and press Enter
@@ -259,6 +265,12 @@ Before/after testing confirmed the fix: the LLM now searches in step 1, processe
 Testing showed the LLM sometimes role-played entire Thought → Observation → Thought → Code sequences within a single response — simulating fake observations in its head before writing actual code. While the parser handled this correctly (it extracted the real code block), the fake observations wasted tokens and risked confusing the LLM in later steps if it mistook its own imagined observations for real ones.
 
 **Fix:** Added a rule: "NEVER simulate or imagine Observation outputs. Only the system provides Observations. Write one Thought and one code block, then stop."
+
+### v9: File analysis guard
+
+When asked to read and analyze a file, the LLM would read it successfully with `readFile()` but then try to re-execute the file's contents as code in the sandbox. The type-checker rejected it (missing imports), and the error poisoned the conversation memory — causing the LLM to believe `readFile` was broken and hallucinate file contents in follow-up tasks.
+
+**Fix:** Added a rule: "When asked to read or analyze files, use readFile() to get the content, then explain it in finalAnswer(). Do NOT execute file contents as code."
 
 ### Code review findings
 

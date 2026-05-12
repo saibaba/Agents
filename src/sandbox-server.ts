@@ -1,10 +1,12 @@
 import * as http from "http";
+import * as fs from "fs";
 import ivm from "isolated-vm";
 import puppeteer, { type Browser } from "puppeteer-core";
 import ollama from "ollama";
 import { MODEL } from "./llm-runner.ts";
 
 const CHROME_PATH = process.env.CHROME_PATH || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const PORT = parseInt(process.argv.find(a => a.startsWith("--port="))?.split("=")[1] || "3000");
 
 let browser: Browser | null = null;
 
@@ -62,6 +64,8 @@ const SANDBOX_DECLARATIONS = `
 declare function log(msg: string): void;
 declare function finalAnswer(value: any): void;
 declare function webSearch(query: string): string;
+declare function readFile(path: string): string;
+declare function writeFile(path: string, content: string): string;
 `;
 
 function typeCheckAndTranspile(code: string): { js: string | null; errors: string[] } {
@@ -129,10 +133,26 @@ async function executeCode(code: string, { timeout = 60000, memoryLimit = 8 } = 
       return new ivm.ExternalCopy(await webSearch(query)).copyInto();
     }));
 
-    // Bootstrap: define webSearch() in the isolate using applySyncPromise
+    context.global.setSync("_readFileRef", new ivm.Reference(async (path: string) => {
+      const content = fs.readFileSync(path, "utf-8");
+      return new ivm.ExternalCopy(content).copyInto();
+    }));
+
+    context.global.setSync("_writeFileRef", new ivm.Reference(async (path: string, content: string) => {
+      fs.writeFileSync(path, content, "utf-8");
+      return new ivm.ExternalCopy("ok").copyInto();
+    }));
+
+    // Bootstrap: define webSearch(), readFile(), writeFile() in the isolate using applySyncPromise
     context.evalSync(`
       function webSearch(query) {
         return _webSearchRef.applySyncPromise(undefined, [query]);
+      }
+      function readFile(path) {
+        return _readFileRef.applySyncPromise(undefined, [path]);
+      }
+      function writeFile(path, content) {
+        return _writeFileRef.applySyncPromise(undefined, [path, content]);
       }
     `);
 
@@ -169,7 +189,7 @@ http.createServer((req, res) => {
       res.end(JSON.stringify({ success: false, error: "Invalid request" }));
     }
   });
-}).listen(3000, () => console.log("Sandbox API running on http://localhost:3000"));
+}).listen(PORT, () => console.log(`Sandbox API running on http://localhost:${PORT}`));
 
 process.on("SIGTERM", async () => { if (browser) await browser.close(); process.exit(0); });
 process.on("SIGINT", async () => { if (browser) await browser.close(); process.exit(0); });

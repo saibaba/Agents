@@ -1,5 +1,5 @@
 #!/bin/bash
-# Smoke test for sandbox-server.ts
+# Smoke test for sandbox-server.ts (10 tests)
 # Usage: ./tests/smoke-sandbox.sh
 
 set -e
@@ -60,6 +60,22 @@ run_test "Runtime error caught" \
 run_test "webSearch available" \
   'const t = typeof webSearch; log(t); finalAnswer(t);' \
   '"result":"function"'
+
+run_test "readFile reads a file" \
+  'const content: string = readFile("package.json"); log(content.substring(0, 20)); finalAnswer("ok");' \
+  '"finalAnswer":true'
+
+run_test "readFile error on missing file" \
+  'const content: string = readFile("/nonexistent/file.txt"); log(content);' \
+  '"success":false'
+
+run_test "writeFile creates a file" \
+  'const r: string = writeFile("/tmp/sandbox-test.txt", "hello sandbox"); log(r); finalAnswer(r);' \
+  '"result":"ok"'
+
+run_test "readFile reads back written file" \
+  'const content: string = readFile("/tmp/sandbox-test.txt"); log(content); finalAnswer(content);' \
+  '"result":"hello sandbox"'
 
 echo ""
 echo "--- Results: $PASS passed, $FAIL failed ---"

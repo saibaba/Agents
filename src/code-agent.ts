@@ -5,7 +5,8 @@ import chalk from "chalk";
 import * as http from "http";
 import { spawn, type ChildProcess } from "child_process";
 
-const SANDBOX_URL = "http://localhost:3000/execute";
+const SANDBOX_PORT = parseInt(process.argv.find(a => a.startsWith("--port="))?.split("=")[1] || "3000");
+const SANDBOX_URL = `http://localhost:${SANDBOX_PORT}/execute`;
 const SANDBOX_SERVER = new URL("./sandbox-server.ts", import.meta.url).pathname;
 const MAX_STEPS = 12;
 const PLANNING_INTERVAL = 5;
@@ -54,7 +55,7 @@ let sandboxProc: ChildProcess | null = null;
 function startSandbox(): Promise<void> {
   return new Promise((resolve, reject) => {
     let resolved = false;
-    sandboxProc = spawn("node", ["--experimental-strip-types", SANDBOX_SERVER], { stdio: ["ignore", "pipe", "pipe"] });
+    sandboxProc = spawn("node", ["--experimental-strip-types", SANDBOX_SERVER, `--port=${SANDBOX_PORT}`], { stdio: ["ignore", "pipe", "pipe"] });
     sandboxProc.stderr!.on("data", (d: Buffer) => process.stderr.write(chalk.gray("[sandbox] " + d)));
     sandboxProc.on("error", (e) => { if (!resolved) { resolved = true; reject(e); } });
     sandboxProc.on("close", (code) => { sandboxProc = null; });
@@ -103,6 +104,8 @@ const SANDBOX_TOOLS = [
   { signature: "log(msg: string): void", description: "prints a message (captured in Observation)" },
   { signature: "finalAnswer(value: any): void", description: "returns the final result and stops execution" },
   { signature: "webSearch(query: string): string", description: "searches the web via Google, returns summarized results" },
+  { signature: "readFile(path: string): string", description: "reads a file from the local filesystem and returns its contents" },
+  { signature: "writeFile(path: string, content: string): string", description: "writes content to a file, returns 'ok' on success" },
 ];
 
 // --- System prompt (smolagents-style) ---
@@ -133,6 +136,7 @@ Rules:
 - NEVER hardcode or assume data. Always use the actual results returned by webSearch().
 - NEVER simulate or imagine Observation outputs. Only the system provides Observations. Write one Thought and one code block, then stop.
 - Do NOT use require(), import, fetch, or Node.js APIs — only pure TS + the sandbox APIs above.
+- When asked to read or analyze files, use readFile() to get the content, then explain it in finalAnswer(). Do NOT execute file contents as code.
 - Don't give up. Solve the task, don't just describe how.
 
 Here are examples using the available tools:
