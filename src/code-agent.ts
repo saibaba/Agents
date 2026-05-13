@@ -322,9 +322,15 @@ async function compactMessages(): Promise<void> {
 
   console.log(chalk.blue(`\n── Compacting conversation (${Math.round(totalChars / 1000)}k chars → summarizing ${toSummarize.length} older messages) ──`));
 
+  const MAX_SUMMARY_INPUT = 12000;
+  let conversationText = toSummarize.map(m => `[${m.role}]: ${m.content}`).join("\n\n");
+  if (conversationText.length > MAX_SUMMARY_INPUT) {
+    conversationText = conversationText.slice(0, MAX_SUMMARY_INPUT) + `\n\n... [${conversationText.length - MAX_SUMMARY_INPUT} chars truncated]`;
+  }
+
   const summaryPrompt: Message[] = [
     { role: "system", content: "You are a summarizer. Condense the following agent conversation into a brief summary preserving: (1) the original task, (2) key facts discovered, (3) what approaches were tried and their outcomes, (4) current state/progress. Be concise — bullet points preferred. Do NOT include code blocks." },
-    { role: "user", content: toSummarize.map(m => `[${m.role}]: ${m.content}`).join("\n\n") },
+    { role: "user", content: conversationText },
   ];
 
   const summary = await runLlmChat(summaryPrompt, MODEL_FAST);
@@ -482,6 +488,10 @@ function prompt() {
   });
 }
 
+
+process.on("exit", stopSandbox);
+process.on("uncaughtException", (e) => { console.error(chalk.red("Uncaught exception:"), e); stopSandbox(); process.exit(1); });
+process.on("unhandledRejection", (e) => { console.error(chalk.red("Unhandled rejection:"), e); stopSandbox(); process.exit(1); });
 
 console.log(chalk.yellow("--- Code Agent (smolagents-style) ---"));
 console.log(chalk.gray("Generates TS code → runs in V8 sandbox. '/plan <task>' for complex tasks, '/reset' to clear memory, '/exit' to quit.\n"));

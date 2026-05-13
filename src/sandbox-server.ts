@@ -3,12 +3,25 @@ import * as fs from "fs";
 import ivm from "isolated-vm";
 import puppeteer, { type Browser } from "puppeteer-core";
 import ollama from "ollama";
-import { MODEL } from "./llm-runner.ts";
+import { MODEL_FAST } from "./llm-runner.ts";
 
 const CHROME_PATH = process.env.CHROME_PATH || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const PORT = parseInt(process.argv.find(a => a.startsWith("--port="))?.split("=")[1] || "3000");
 
 let browser: Browser | null = null;
+let browserIdleTimer: ReturnType<typeof setTimeout> | null = null;
+const BROWSER_IDLE_MS = 5 * 60 * 1000;
+
+function resetBrowserIdleTimer() {
+  if (browserIdleTimer) clearTimeout(browserIdleTimer);
+  browserIdleTimer = setTimeout(async () => {
+    if (browser) {
+      console.log("[browser] Closing after 5 minutes of inactivity");
+      await browser.close();
+      browser = null;
+    }
+  }, BROWSER_IDLE_MS);
+}
 
 async function getBrowser(): Promise<Browser> {
   if (!browser || !browser.connected) {
@@ -18,6 +31,7 @@ async function getBrowser(): Promise<Browser> {
       args: ["--no-first-run", "--disable-blink-features=AutomationControlled"],
     });
   }
+  resetBrowserIdleTimer();
   return browser;
 }
 
@@ -36,7 +50,7 @@ async function webSearch(query: string): Promise<string> {
 
     const truncated = rawText.slice(0, 8000);
     const summary = await ollama.chat({
-      model: MODEL,
+      model: MODEL_FAST,
       messages: [{
         role: "user",
         content: `Below are raw Google search results for the query "${query}". Extract and summarize the key facts, findings, and relevant URLs. Be concise.\n\n${truncated}`,
@@ -69,15 +83,43 @@ async function httpGet(url: string): Promise<string> {
     }
     const response = await fetch(url, {
       headers: { "User-Agent": "CodeAgent/1.0" },
+      redirect: "follow",
       signal: AbortSignal.timeout(15000),
     });
+    const finalUrl = response.url;
+    const finalHost = new URL(finalUrl).hostname;
+    if (BLOCKED_HOSTS.includes(finalHost) || /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/.test(finalHost)) {
+      return `Error: redirect to ${finalHost} is blocked for security reasons.`;
+    }
     const text = await response.text();
     console.log(`[httpGet] ${response.status} — ${text.length} chars`);
-    return text.slice(0, 50000);
+    const statusLine = `HTTP ${response.status} ${response.statusText}\n\n`;
+    return statusLine + text.slice(0, 50000);
   } catch (e: any) {
     console.log(`[httpGet] error: ${e.message}`);
     return `HTTP error: ${e.message}`;
   }
+}
+
+import * as nodePath from "path";
+
+const BLOCKED_PATH_PREFIXES = [
+  "/etc", "/var", "/usr", "/sys", "/proc", "/dev",
+  nodePath.join(process.env.HOME || "", ".ssh"),
+  nodePath.join(process.env.HOME || "", ".aws"),
+  nodePath.join(process.env.HOME || "", ".gnupg"),
+  nodePath.join(process.env.HOME || "", ".config"),
+  nodePath.join(process.env.HOME || "", ".env"),
+];
+
+function validatePath(filePath: string): string | null {
+  const resolved = nodePath.resolve(filePath);
+  for (const prefix of BLOCKED_PATH_PREFIXES) {
+    if (resolved.startsWith(prefix)) {
+      return `Error: access to ${resolved} is blocked for security reasons.`;
+    }
+  }
+  return null;
 }
 
 import ts from "typescript";
@@ -93,21 +135,23 @@ declare function readFile(path: string): string;
 declare function writeFile(path: string, content: string): string;
 `;
 
+const TS_OPTIONS: ts.CompilerOptions = { strict: true, target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext, noEmit: true };
+const TS_FILENAME = "sandbox.ts";
+const cachedHost = ts.createCompilerHost(TS_OPTIONS);
+const originalGetSourceFile = cachedHost.getSourceFile;
+cachedHost.fileExists = (name) => name === TS_FILENAME || ts.sys.fileExists(name);
+
 function typeCheckAndTranspile(code: string): { js: string | null; errors: string[] } {
   const fullSource = SANDBOX_DECLARATIONS + code;
-  const fileName = "sandbox.ts";
 
-  const host = ts.createCompilerHost({ strict: true, target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext });
-  const originalGetSourceFile = host.getSourceFile;
-  host.getSourceFile = (name, languageVersion) => {
-    if (name === fileName) return ts.createSourceFile(name, fullSource, languageVersion);
-    return originalGetSourceFile.call(host, name, languageVersion);
+  cachedHost.getSourceFile = (name, languageVersion) => {
+    if (name === TS_FILENAME) return ts.createSourceFile(name, fullSource, languageVersion);
+    return originalGetSourceFile.call(cachedHost, name, languageVersion);
   };
-  host.fileExists = (name) => name === fileName || ts.sys.fileExists(name);
-  host.readFile = (name) => name === fileName ? fullSource : ts.sys.readFile(name);
+  cachedHost.readFile = (name) => name === TS_FILENAME ? fullSource : ts.sys.readFile(name);
 
-  const program = ts.createProgram([fileName], { strict: true, target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext, noEmit: true }, host);
-  const diagnostics = ts.getPreEmitDiagnostics(program).filter(d => d.file?.fileName === fileName);
+  const program = ts.createProgram([TS_FILENAME], TS_OPTIONS, cachedHost);
+  const diagnostics = ts.getPreEmitDiagnostics(program).filter(d => d.file?.fileName === TS_FILENAME);
 
   if (diagnostics.length > 0) {
     // Adjust line numbers to account for prepended declarations
@@ -163,11 +207,15 @@ async function executeCode(code: string, { timeout = 60000, memoryLimit = 8 } = 
     }));
 
     context.global.setSync("_readFileRef", new ivm.Reference(async (path: string) => {
+      const blocked = validatePath(path);
+      if (blocked) throw new Error(blocked);
       const content = fs.readFileSync(path, "utf-8");
       return new ivm.ExternalCopy(content).copyInto();
     }));
 
     context.global.setSync("_writeFileRef", new ivm.Reference(async (path: string, content: string) => {
+      const blocked = validatePath(path);
+      if (blocked) throw new Error(blocked);
       fs.writeFileSync(path, content, "utf-8");
       return new ivm.ExternalCopy("ok").copyInto();
     }));
@@ -202,6 +250,8 @@ async function executeCode(code: string, { timeout = 60000, memoryLimit = 8 } = 
 
 // --- HTTP server ---
 
+const MAX_BODY_SIZE = 1024 * 1024; // 1MB
+
 http.createServer((req, res) => {
   if (req.method !== "POST" || req.url !== "/execute") {
     res.writeHead(404);
@@ -209,8 +259,18 @@ http.createServer((req, res) => {
   }
 
   let body = "";
-  req.on("data", (chunk: string) => body += chunk);
+  let exceeded = false;
+  req.on("data", (chunk: string) => {
+    body += chunk;
+    if (body.length > MAX_BODY_SIZE && !exceeded) {
+      exceeded = true;
+      res.writeHead(413, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: false, error: "Request body too large (max 1MB)" }));
+      req.destroy();
+    }
+  });
   req.on("end", async () => {
+    if (exceeded) return;
     try {
       const { code } = JSON.parse(body);
       const result = await executeCode(code);
@@ -223,5 +283,10 @@ http.createServer((req, res) => {
   });
 }).listen(PORT, () => console.log(`Sandbox API running on http://localhost:${PORT}`));
 
-process.on("SIGTERM", async () => { if (browser) await browser.close(); process.exit(0); });
-process.on("SIGINT", async () => { if (browser) await browser.close(); process.exit(0); });
+async function shutdown() {
+  if (browserIdleTimer) clearTimeout(browserIdleTimer);
+  if (browser) await browser.close();
+  process.exit(0);
+}
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);

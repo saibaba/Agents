@@ -356,6 +356,26 @@ Added `httpGet(url)` as a new sandbox tool, allowing the agent to directly fetch
 - Private IP ranges (10.x, 172.16-31.x, 192.168.x)
 - Cloud metadata (169.254.169.254, metadata.google.internal)
 
+### v18: Security hardening and performance fixes
+
+A second review pass focused on security, resource management, and robustness:
+
+**Security:**
+- File path restrictions — `readFile()`/`writeFile()` now block access to sensitive paths (`/etc`, `/var`, `/usr`, `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config`)
+- Redirect SSRF protection — `httpGet()` checks the final URL after redirects against the same blocklist, preventing `evil.com → 127.0.0.1` bypasses
+- Request body size limit — sandbox server rejects POST bodies over 1MB to prevent OOM
+
+**Performance:**
+- Cached TypeScript compiler host — compiler options and host are created once at startup, only the source file changes per execution
+- WebSearch uses fast model — search result summarization now uses `qwen3:8b` instead of the expensive 30B coding model
+- Browser auto-close — Chrome closes after 5 minutes of inactivity to free memory
+
+**Robustness:**
+- Orphan process cleanup — sandbox child process is killed on uncaught exceptions, unhandled rejections, and normal exit
+- Graceful shutdown — SIGTERM/SIGINT clears browser idle timer and closes Chrome before exiting
+- Compaction input cap — conversation text sent for summarization is capped at 12k chars to fit the fast model's 16k context window
+- httpGet status code — responses now include `HTTP <status> <statusText>` prefix so the agent can detect errors
+
 ### Code review findings
 
 A systematic review identified 14 issues. Key fixes applied:
