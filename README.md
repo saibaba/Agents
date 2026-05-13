@@ -272,6 +272,53 @@ When asked to read and analyze a file, the LLM would read it successfully with `
 
 **Fix:** Added a rule: "When asked to read or analyze files, use readFile() to get the content, then explain it in finalAnswer(). Do NOT execute file contents as code."
 
+### v10: Observation truncation and step budget awareness
+
+Two improvements to agent reliability:
+
+**Observation truncation** — `webSearch()` and `readFile()` can return huge results that blow up context. Added a `truncateObservation()` helper that caps observations at 8000 characters, keeping the first and last half with a note about how much was trimmed in between.
+
+**Step budget awareness** — Each observation now includes a footer showing remaining steps (e.g., `[9 steps remaining]`). When the agent is down to 3 or fewer steps, it gets a warning: `[⚠️ 2 steps remaining — wrap up or call finalAnswer()]`. This helps the agent prioritize and avoid running out of steps without producing an answer.
+
+### v11: Streaming LLM output
+
+Replaced the blocking `runLlmChat()` call in the agent loop with `runLlmChatStream()`, which uses Ollama's native streaming. The agent's "Thought" text now appears token-by-token in the terminal as it's generated. Once a code block begins, streaming to the terminal stops (the code is printed in full after parsing). This makes the agent feel significantly more responsive on longer reasoning steps.
+
+### v12: Last-code-block extraction
+
+The regex-based code parser previously grabbed the *first* code block from the LLM's response. If the LLM self-corrected mid-response ("wait, that's wrong, here's the fix"), the agent would execute the broken first attempt. Changed `parseResponse()` to use `matchAll` and take the *last* code block, so self-corrections are respected.
+
+### v13: Conversation compaction
+
+Previously, when conversation memory grew large the agent just warned the user to `/reset`. Now it automatically compacts the conversation when it exceeds 40k characters:
+
+1. The system prompt and most recent 6 messages are preserved intact
+2. Older messages are sent to the LLM with a summarizer prompt that extracts: the original task, key facts discovered, approaches tried and their outcomes, and current progress
+3. The older messages are replaced with a single condensed summary
+
+Compaction is checked before each new task and before each step (after the first). It won't trigger if there are fewer than 4 messages to summarize. The before/after size is logged so the user can see the savings. This allows multi-task sessions to run much longer without hitting context window limits or degrading response quality.
+
+### v14: Few-shot example decontamination
+
+Testing revealed that the agent would skip `webSearch()` entirely and return values memorized from the system prompt's few-shot examples. For example, asking "BTC ETH price" produced the exact numbers from the example ($94,250 / $3,180) without any search.
+
+**Root cause:** The few-shot examples used real-world entities (Tokyo, Eiffel Tower, Bitcoin) with plausible numbers. The LLM treated these as ground truth and short-circuited.
+
+**Fix:** Replaced all few-shot examples with obviously fictional entities — "Xanadu City", "Structure Alpha/Beta", "CoinX/CoinY" — with arbitrary numbers that cannot be confused with real data. The model can no longer parrot example values as answers and is forced to actually call `webSearch()` for factual questions.
+
+### v15: Token tracking and step replay/export
+
+Two observability features added:
+
+**Token tracking** — Each step now displays token usage (prompt + completion) and cumulative totals for the session. At task completion, a task-level total is printed. Metrics come from Ollama's streaming response (`prompt_eval_count`, `eval_count`, `total_duration`). This gives visibility into which tasks are expensive and how context grows over steps.
+
+**Step replay/export** — Every completed task writes a full trace to `sessions/trace-<timestamp>.json` containing:
+- The original task and timestamp
+- Each step's thought, code, observation, and token metrics
+- Total metrics and the final answer (or null if max steps reached)
+
+Trace files enable post-hoc analysis of failure patterns, benchmarking across model changes, and comparing prompt strategies. The `sessions/` directory is gitignored.
+
 ### Code review findings
 
 A systematic review identified 14 issues. Key fixes applied:
@@ -284,3 +331,29 @@ A systematic review identified 14 issues. Key fixes applied:
 - Hardcoded Chrome path (now env var with default)
 - Sandbox execution timeout too short for web search (increased to 60s)
 - Model name duplicated across files (single-sourced in llm-runner.ts)
+
+## Possible Improvements
+
+### Persistent key-value store across steps
+
+Currently, state does not persist between steps — each code block runs in a fresh V8 isolate. If the agent discovers a value in step 2 that it needs in step 5, it must `log()` the value and later hardcode it from the observation text in conversation history.
+
+This works fine for short tasks (2-3 steps) but becomes fragile on longer chains (4+ steps) where multiple intermediate values compound. With conversation compaction enabled, early observations may be summarized away entirely, making the values unrecoverable.
+
+**Proposed API:**
+```ts
+setState(key: string, value: any): void   // persists across steps within a task
+getState(key: string): any                // retrieves in later steps
+```
+
+**Implementation:** The sandbox server would maintain a `Map<string, any>` in memory, reset at the start of each task. `setState`/`getState` would be exposed as synchronous globals in the isolate, similar to `log` and `finalAnswer`.
+
+**When it matters:** Tasks requiring 4+ steps where intermediate results from different searches or computations need to be combined later. For simple 2-step search-and-answer tasks, the current approach works fine.
+
+### LLM-based task classifier for automatic planning
+
+A quick LLM call ("Is this task simple or complex?") at the start of each task could detect complex tasks upfront and trigger an initial planning step only when needed, without requiring the user to type `/plan`. This would add minimal latency while giving complex tasks the benefit of upfront planning automatically.
+
+### Adaptive compaction threshold
+
+Use token tracking data to dynamically adjust the compaction threshold based on how quickly context is growing, rather than using a fixed 40k character limit.

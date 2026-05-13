@@ -1,15 +1,62 @@
-import { runLlmChat } from "./llm-runner.ts";
+import { runLlmChat, runLlmChatStream, type TokenMetrics } from "./llm-runner.ts";
 import type { Message } from "ollama";
 import * as readline from "readline";
 import chalk from "chalk";
 import * as http from "http";
+import * as fs from "fs";
+import * as path from "path";
 import { spawn, type ChildProcess } from "child_process";
+
 
 const SANDBOX_PORT = parseInt(process.argv.find(a => a.startsWith("--port="))?.split("=")[1] || "3000");
 const SANDBOX_URL = `http://localhost:${SANDBOX_PORT}/execute`;
 const SANDBOX_SERVER = new URL("./sandbox-server.ts", import.meta.url).pathname;
 const MAX_STEPS = 12;
 const PLANNING_INTERVAL = 5;
+const MAX_OBSERVATION_CHARS = 8000;
+const COMPACTION_THRESHOLD = 40000;
+const COMPACTION_KEEP_RECENT = 6;
+const SESSIONS_DIR = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "sessions");
+
+// --- Token tracking ---
+
+interface StepTrace {
+  step: number;
+  thought: string;
+  code: string | null;
+  observation: string;
+  metrics: TokenMetrics;
+}
+
+interface TaskTrace {
+  task: string;
+  timestamp: string;
+  steps: StepTrace[];
+  totalMetrics: TokenMetrics;
+  finalAnswer: string | null;
+}
+
+let currentTrace: TaskTrace | null = null;
+let cumulativeMetrics: TokenMetrics = { promptTokens: 0, completionTokens: 0, totalDurationMs: 0 };
+
+function addMetrics(target: TokenMetrics, source: TokenMetrics) {
+  target.promptTokens += source.promptTokens;
+  target.completionTokens += source.completionTokens;
+  target.totalDurationMs += source.totalDurationMs;
+}
+
+function printMetrics(label: string, metrics: TokenMetrics) {
+  const total = metrics.promptTokens + metrics.completionTokens;
+  console.log(chalk.gray(`  ${label}: ${metrics.promptTokens} prompt + ${metrics.completionTokens} completion = ${total} tokens (${(metrics.totalDurationMs / 1000).toFixed(1)}s)`));
+}
+
+function saveTrace(trace: TaskTrace) {
+  if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+  const filename = `trace-${trace.timestamp.replace(/[:.]/g, "-")}.json`;
+  const filepath = path.join(SESSIONS_DIR, filename);
+  fs.writeFileSync(filepath, JSON.stringify(trace, null, 2));
+  console.log(chalk.gray(`  Trace saved: ${filepath}`));
+}
 
 // --- Planning prompts ---
 
@@ -152,54 +199,52 @@ log('Fibonacci: ' + JSON.stringify(fib));
 finalAnswer(fib);
 \`\`\`
 ---
-Task: "What is the population of Tokyo?"
+Task: "What is the population of Xanadu City?"
 
-Thought: I need to search for this information. I'll search and log the result.
+Thought: I don't know this — I need to search for it. I'll search and log the result.
 \`\`\`ts
-const result: string = webSearch("Tokyo population");
+const result: string = webSearch("Xanadu City population");
 log(result);
 \`\`\`
-Observation: Tokyo has a population of approximately 13.96 million people as of 2024.
+Observation: Xanadu City has a population of approximately 2.37 million people.
 
 Thought: I have the answer from the search results.
 \`\`\`ts
-finalAnswer("Tokyo has a population of approximately 13.96 million people.");
+finalAnswer("Xanadu City has a population of approximately 2.37 million people.");
 \`\`\`
 ---
-Task: "Which is taller, the Eiffel Tower or the Empire State Building, and by how much?"
+Task: "Which is taller, Structure Alpha or Structure Beta, and by how much?"
 
-Thought: I need to search for the heights of both structures. I'll search and log the results.
+Thought: I need to search for the heights. I'll search and log the results.
 \`\`\`ts
-const results: string = webSearch("Eiffel Tower vs Empire State Building height meters");
+const results: string = webSearch("Structure Alpha vs Structure Beta height meters");
 log(results);
 \`\`\`
-Observation: The Eiffel Tower is 330 meters tall. The Empire State Building is 443 meters tall.
+Observation: Structure Alpha is 187 meters tall. Structure Beta is 264 meters tall.
 
 Thought: Now I can calculate the difference using the actual data from the search.
 \`\`\`ts
-const eiffel: number = 330;
-const empire: number = 443;
-const diff: number = empire - eiffel;
-log(\`Empire State Building is taller by \${diff} meters\`);
-finalAnswer(\`The Empire State Building (443m) is taller than the Eiffel Tower (330m) by \${diff} meters.\`);
+const alpha: number = 187;
+const beta: number = 264;
+const diff: number = beta - alpha;
+finalAnswer(\`Structure Beta (\${beta}m) is taller than Structure Alpha (\${alpha}m) by \${diff} meters.\`);
 \`\`\`
 ---
-Task: "Find the current price of Bitcoin and Ethereum, and calculate the BTC/ETH ratio."
+Task: "Find the current price of CoinX and CoinY, and calculate the X/Y ratio."
 
-Thought: I'll search for current crypto prices first.
+Thought: I'll search for current prices first.
 \`\`\`ts
-const prices: string = webSearch("Bitcoin Ethereum price today USD");
+const prices: string = webSearch("CoinX CoinY price today USD");
 log(prices);
 \`\`\`
-Observation: Bitcoin is trading at $94,250 and Ethereum at $3,180.
+Observation: CoinX is trading at $542 and CoinY at $38.
 
 Thought: Now I'll calculate the ratio from the search results.
 \`\`\`ts
-const btc: number = 94250;
-const eth: number = 3180;
-const ratio: number = Math.round((btc / eth) * 100) / 100;
-log(\`BTC/ETH ratio: \${ratio}\`);
-finalAnswer(\`Bitcoin: $\${btc}, Ethereum: $\${eth}. The BTC/ETH ratio is \${ratio}.\`);
+const coinX: number = 542;
+const coinY: number = 38;
+const ratio: number = Math.round((coinX / coinY) * 100) / 100;
+finalAnswer(\`CoinX: $\${coinX}, CoinY: $\${coinY}. The X/Y ratio is \${ratio}.\`);
 \`\`\`
 ---
 
@@ -207,12 +252,22 @@ Now solve the task given to you.${customInstructions ? "\n\nAdditional instructi
 
 let customInstructions: string | null = null;
 
+// --- Observation truncation ---
+
+function truncateObservation(text: string, max = MAX_OBSERVATION_CHARS): string {
+  if (text.length <= max) return text;
+  const half = Math.floor(max / 2);
+  const trimmed = text.length - max;
+  return text.slice(0, half) + `\n\n... [${trimmed} characters truncated] ...\n\n` + text.slice(-half);
+}
+
 // --- Parse LLM output ---
 
 function parseResponse(text: string): { thought: string; code: string | null } {
-  const codeMatch = text.match(/```(?:ts|typescript|js|javascript)\s*\n([\s\S]*?)```/);
-  const thought = text.replace(/```(?:ts|typescript|js|javascript)\s*\n[\s\S]*?```/, "").trim();
-  return { thought, code: codeMatch ? codeMatch[1].trim() : null };
+  const codeBlocks = [...text.matchAll(/```(?:ts|typescript|js|javascript)\s*\n([\s\S]*?)```/g)];
+  const lastBlock = codeBlocks.length > 0 ? codeBlocks[codeBlocks.length - 1] : null;
+  const thought = text.replace(/```(?:ts|typescript|js|javascript)\s*\n[\s\S]*?```/g, "").trim();
+  return { thought, code: lastBlock ? lastBlock[1].trim() : null };
 }
 
 // --- Planning ---
@@ -250,15 +305,53 @@ function resetMemory() {
   messages = [{ role: "system", content: SYSTEM_PROMPT() }];
 }
 
+// --- Conversation compaction ---
+
+async function compactMessages(): Promise<void> {
+  const totalChars = messages.reduce((n, m) => n + (m.content?.length || 0), 0);
+  if (totalChars < COMPACTION_THRESHOLD) return;
+
+  const systemMsg = messages[0];
+  const toSummarize = messages.slice(1, -COMPACTION_KEEP_RECENT);
+  const recent = messages.slice(-COMPACTION_KEEP_RECENT);
+
+  if (toSummarize.length < 4) return;
+
+  console.log(chalk.blue(`\n── Compacting conversation (${Math.round(totalChars / 1000)}k chars → summarizing ${toSummarize.length} older messages) ──`));
+
+  const summaryPrompt: Message[] = [
+    { role: "system", content: "You are a summarizer. Condense the following agent conversation into a brief summary preserving: (1) the original task, (2) key facts discovered, (3) what approaches were tried and their outcomes, (4) current state/progress. Be concise — bullet points preferred. Do NOT include code blocks." },
+    { role: "user", content: toSummarize.map(m => `[${m.role}]: ${m.content}`).join("\n\n") },
+  ];
+
+  const summary = await runLlmChat(summaryPrompt);
+  const cleanSummary = summary.replace(/```[\s\S]*?```/g, "").trim();
+
+  messages = [
+    systemMsg,
+    { role: "user", content: `[Conversation summary — older messages were compacted to save context]\n\n${cleanSummary}` },
+    { role: "assistant", content: "Understood. I have the context from the summary above and will continue from where we left off." },
+    ...recent,
+  ];
+
+  const newChars = messages.reduce((n, m) => n + (m.content?.length || 0), 0);
+  console.log(chalk.blue(`── Compacted: ${Math.round(totalChars / 1000)}k → ${Math.round(newChars / 1000)}k chars ──\n`));
+}
+
 // --- Agent loop ---
 
 async function runCodeAgent(task: string, reset = true, plan = false): Promise<void> {
   if (reset) resetMemory();
 
-  const totalChars = messages.reduce((n, m) => n + (m.content?.length || 0), 0);
-  if (totalChars > 50000) {
-    console.log(chalk.red(`⚠️  Memory is large (~${Math.round(totalChars / 1000)}k chars). Consider typing /reset to avoid exceeding context window.`));
-  }
+  await compactMessages();
+
+  currentTrace = {
+    task,
+    timestamp: new Date().toISOString(),
+    steps: [],
+    totalMetrics: { promptTokens: 0, completionTokens: 0, totalDurationMs: 0 },
+    finalAnswer: null,
+  };
 
   messages.push({ role: "user", content: `Task: "${task}"` });
 
@@ -268,19 +361,37 @@ async function runCodeAgent(task: string, reset = true, plan = false): Promise<v
   }
 
   for (let step = 0; step < MAX_STEPS; step++) {
+    if (step > 0) await compactMessages();
     // Periodic re-planning when the task is taking many steps
     if (step > 0 && step % PLANNING_INTERVAL === 0) {
       await runPlanningStep(task, step, messages);
     }
     console.log(chalk.yellow(`\n--- Step ${step + 1}/${MAX_STEPS} ---`));
 
-    const llmOutput = await runLlmChat(messages);
-    const { thought, code } = parseResponse(llmOutput);
+    process.stdout.write(chalk.cyan("Thinking: "));
+    let inCodeBlock = false;
+    const { text: llmOutput, metrics } = await runLlmChatStream(messages, (token) => {
+      if (!inCodeBlock) {
+        if (token.includes("```")) {
+          inCodeBlock = true;
+          process.stdout.write("\n");
+        } else {
+          process.stdout.write(token);
+        }
+      }
+    });
+    if (!inCodeBlock) process.stdout.write("\n");
 
-    if (thought) console.log(chalk.cyan("Thought:"), thought);
+    addMetrics(currentTrace.totalMetrics, metrics);
+    addMetrics(cumulativeMetrics, metrics);
+    printMetrics("Step", metrics);
+    printMetrics("Cumulative", cumulativeMetrics);
+
+    const { thought, code } = parseResponse(llmOutput);
 
     if (!code) {
       console.log(chalk.gray("Agent (no code):"), thought);
+      currentTrace.steps.push({ step: step + 1, thought, code: null, observation: "(no code)", metrics });
       messages.push({ role: "assistant", content: llmOutput });
       messages.push({ role: "user", content: "Observation: No code was generated. Please write code to proceed." });
       continue;
@@ -296,26 +407,39 @@ async function runCodeAgent(task: string, reset = true, plan = false): Promise<v
     } catch (e: any) {
       const observation = `Error: Sandbox unavailable — ${e.message}`;
       console.log(chalk.gray("Observation:"), observation);
+      currentTrace.steps.push({ step: step + 1, thought, code, observation, metrics });
       messages.push({ role: "user", content: `Observation: ${observation}` });
       continue;
     }
     const logs = result.output?.join("\n") || "";
-    const observation = result.success
+    const rawObservation = result.success
       ? `${logs}${result.result != null ? "\nResult: " + result.result : ""}`
       : `Error: ${result.error}\n${logs}\nThis failed. Avoid repeating the same mistake — if this has failed before, try a fundamentally different approach.`;
 
+    const observation = truncateObservation(rawObservation);
     console.log(chalk.gray("Observation:"), observation);
+
+    currentTrace.steps.push({ step: step + 1, thought, code, observation, metrics });
 
     // Check if finalAnswer was called at runtime
     if (result.success && result.finalAnswer) {
+      currentTrace.finalAnswer = result.result ?? null;
       console.log(chalk.green("\n✅ Final Answer:"), result.result);
+      printMetrics("Task total", currentTrace.totalMetrics);
+      saveTrace(currentTrace);
       return;
     }
 
-    messages.push({ role: "user", content: `Observation: ${observation}` });
+    const stepsRemaining = MAX_STEPS - step - 1;
+    const budgetNote = stepsRemaining <= 3
+      ? `\n[⚠️ ${stepsRemaining} step${stepsRemaining === 1 ? "" : "s"} remaining — wrap up or call finalAnswer()]`
+      : `\n[${stepsRemaining} steps remaining]`;
+    messages.push({ role: "user", content: `Observation: ${observation}${budgetNote}` });
   }
 
   console.log(chalk.red("\n⚠️  Max steps reached without final answer."));
+  printMetrics("Task total", currentTrace.totalMetrics);
+  saveTrace(currentTrace);
 }
 
 // --- REPL ---
@@ -354,6 +478,7 @@ function prompt() {
     prompt();
   });
 }
+
 
 console.log(chalk.yellow("--- Code Agent (smolagents-style) ---"));
 console.log(chalk.gray("Generates TS code → runs in V8 sandbox. '/plan <task>' for complex tasks, '/reset' to clear memory, '/exit' to quit.\n"));

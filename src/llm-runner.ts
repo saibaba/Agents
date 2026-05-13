@@ -84,3 +84,45 @@ export async function runLlmChat(messages: Message[]): Promise<string> {
   });
   return response.message.content;
 }
+
+export interface TokenMetrics {
+  promptTokens: number;
+  completionTokens: number;
+  totalDurationMs: number;
+}
+
+export async function runLlmChatStream(
+  messages: Message[],
+  onToken: (token: string) => void
+): Promise<{ text: string; metrics: TokenMetrics }> {
+  const response = await ollama.chat({
+    model: MODEL,
+    messages,
+    stream: true,
+    options: {
+      temperature: 0.6,
+      top_p: 0.95,
+      top_k: 20,
+      num_predict: 4096,
+      num_ctx: 32768,
+      repeat_penalty: 1.05,
+    },
+  });
+  let full = "";
+  let metrics: TokenMetrics = { promptTokens: 0, completionTokens: 0, totalDurationMs: 0 };
+  for await (const chunk of response) {
+    const token = chunk.message.content;
+    if (token) {
+      full += token;
+      onToken(token);
+    }
+    if (chunk.done) {
+      metrics = {
+        promptTokens: (chunk as any).prompt_eval_count || 0,
+        completionTokens: (chunk as any).eval_count || 0,
+        totalDurationMs: Math.round(((chunk as any).total_duration || 0) / 1e6),
+      };
+    }
+  }
+  return { text: full, metrics };
+}
