@@ -108,9 +108,10 @@ ollama serve
 
 ```bash
 ollama pull qwen3-coder:30b
+ollama pull qwen3:8b
 ```
 
-You can change the model in `src/llm-runner.ts` (the `MODEL` constant).
+You can change the models in `src/llm-runner.ts` (`MODEL` for code generation, `MODEL_FAST` for planning/compaction).
 
 ### 4. Verify Chrome is available
 
@@ -306,6 +307,17 @@ Testing revealed that the agent would skip `webSearch()` entirely and return val
 
 **Fix:** Replaced all few-shot examples with obviously fictional entities — "Xanadu City", "Structure Alpha/Beta", "CoinX/CoinY" — with arbitrary numbers that cannot be confused with real data. The model can no longer parrot example values as answers and is forced to actually call `webSearch()` for factual questions.
 
+### v14b: Anti-fabrication rules
+
+Testing revealed a deeper hallucination problem beyond few-shot contamination (v14). When the agent couldn't accomplish a task with available tools (e.g., "fetch the HTML of https://example.com"), it would fabricate plausible output from training data rather than admitting the limitation.
+
+**Root cause:** The system prompt rule "Don't give up" left the agent no legitimate exit path when tools were insufficient. Combined with the lack of an explicit prohibition on using training knowledge as data, the agent would invent results to satisfy the task.
+
+**Fix:** Three rule changes:
+1. "NEVER fabricate, recall, or reconstruct data from training knowledge" — forces use of `webSearch()`/`readFile()` for all factual data
+2. "If a task is impossible with available tools, call finalAnswer() explaining the limitation" — gives a legitimate failure path
+3. Changed "Don't give up" to "Don't give up on tasks that ARE possible" — removes pressure to fabricate on impossible tasks
+
 ### v15: Token tracking and step replay/export
 
 Two observability features added:
@@ -318,6 +330,17 @@ Two observability features added:
 - Total metrics and the final answer (or null if max steps reached)
 
 Trace files enable post-hoc analysis of failure patterns, benchmarking across model changes, and comparing prompt strategies. The `sessions/` directory is gitignored.
+
+### v16: Multi-model routing
+
+Not all steps need the full coding model. Planning and compaction are text-only tasks that don't require code generation ability. Introduced a two-model setup:
+
+- **`qwen3-coder:30b`** (primary) — used for the main agent loop where TypeScript code is generated
+- **`qwen3:8b`** (fast) — used for planning steps and conversation compaction summaries
+
+This reduces latency and memory usage on auxiliary steps while preserving code quality where it matters. The fast model uses a smaller context window (16k vs 32k) since it handles shorter inputs.
+
+**Setup:** Pull the fast model with `ollama pull qwen3:8b`. Both models are configured in `src/llm-runner.ts` (`MODEL` and `MODEL_FAST` constants).
 
 ### Code review findings
 
@@ -357,3 +380,7 @@ A quick LLM call ("Is this task simple or complex?") at the start of each task c
 ### Adaptive compaction threshold
 
 Use token tracking data to dynamically adjust the compaction threshold based on how quickly context is growing, rather than using a fixed 40k character limit.
+
+### Planner knowledge leakage (low risk)
+
+The fast model used for planning can leak training knowledge into plan templates (e.g., writing "as of 2023, Tokyo has X million" as a placeholder). Since the plan only guides strategy and the code generation step still searches for real data, this doesn't affect final answers. A stricter planning prompt ("Do not include specific dates or figures from memory — use placeholders like X, Y, Z") would eliminate it.

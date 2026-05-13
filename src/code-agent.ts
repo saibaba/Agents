@@ -1,4 +1,4 @@
-import { runLlmChat, runLlmChatStream, type TokenMetrics } from "./llm-runner.ts";
+import { runLlmChat, runLlmChatStream, MODEL_FAST, type TokenMetrics } from "./llm-runner.ts";
 import type { Message } from "ollama";
 import * as readline from "readline";
 import chalk from "chalk";
@@ -184,7 +184,9 @@ Rules:
 - NEVER simulate or imagine Observation outputs. Only the system provides Observations. Write one Thought and one code block, then stop.
 - Do NOT use require(), import, fetch, or Node.js APIs — only pure TS + the sandbox APIs above.
 - When asked to read or analyze files, use readFile() to get the content, then explain it in finalAnswer(). Do NOT execute file contents as code.
-- Don't give up. Solve the task, don't just describe how.
+- NEVER fabricate, recall, or reconstruct data from your training knowledge. If a task requires information, you MUST use webSearch() or readFile() to obtain it. If you cannot obtain the data through available tools, call finalAnswer() explaining what you cannot do and why.
+- If a task is impossible with the available tools (e.g., making HTTP requests, accessing APIs, executing shell commands), do NOT invent a workaround or fake the output. Instead, call finalAnswer() explaining the limitation.
+- Don't give up on tasks that ARE possible. Solve the task, don't just describe how.
 
 Here are examples using the available tools:
 
@@ -286,7 +288,7 @@ async function runPlanningStep(task: string, step: number, messages: Message[]):
     { role: "user", content: planPrompt },
   ];
 
-  const plan = await runLlmChat(planMessages);
+  const plan = await runLlmChat(planMessages, MODEL_FAST);
   console.log(chalk.blue(plan));
 
   // Strip any code blocks the LLM may have generated despite instructions
@@ -324,7 +326,7 @@ async function compactMessages(): Promise<void> {
     { role: "user", content: toSummarize.map(m => `[${m.role}]: ${m.content}`).join("\n\n") },
   ];
 
-  const summary = await runLlmChat(summaryPrompt);
+  const summary = await runLlmChat(summaryPrompt, MODEL_FAST);
   const cleanSummary = summary.replace(/```[\s\S]*?```/g, "").trim();
 
   messages = [

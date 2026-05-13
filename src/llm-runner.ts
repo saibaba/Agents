@@ -3,6 +3,7 @@ import chalk from "chalk";
 import type { Session } from "./session.ts";
 
 export const MODEL = "qwen3-coder:30b";
+export const MODEL_FAST = "qwen3:8b";
 
 type ToolExecutor = (name: string, args: Record<string, unknown>) => Promise<string>;
 
@@ -69,16 +70,17 @@ export async function runLlm(opts: LlmRunnerOptions, round = 0): Promise<string>
   return response.message.content;
 }
 
-export async function runLlmChat(messages: Message[]): Promise<string> {
+export async function runLlmChat(messages: Message[], model = MODEL): Promise<string> {
+  console.log(chalk.gray(`  [model: ${model}]`));
   const response: ChatResponse = await ollama.chat({
-    model: MODEL,
+    model,
     messages,
     options: {
       temperature: 0.6,
       top_p: 0.95,
       top_k: 20,
       num_predict: 4096,
-      num_ctx: 32768,
+      num_ctx: model === MODEL ? 32768 : 16384,
       repeat_penalty: 1.05,
     },
   });
@@ -95,6 +97,7 @@ export async function runLlmChatStream(
   messages: Message[],
   onToken: (token: string) => void
 ): Promise<{ text: string; metrics: TokenMetrics }> {
+  console.log(chalk.gray(`  [model: ${MODEL}]`));
   const response = await ollama.chat({
     model: MODEL,
     messages,
