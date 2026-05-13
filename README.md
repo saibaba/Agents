@@ -49,7 +49,10 @@ An HTTP server that executes code in a V8 isolate via `isolated-vm`. Provides:
   - `log(msg)` — captures print output
   - `finalAnswer(value)` — signals task completion
   - `webSearch(query)` — searches Google via Puppeteer, summarizes results with the LLM
-- **Isolation** — code runs in a fresh V8 isolate per request with no filesystem, network, or Node.js API access
+  - `httpGet(url)` — fetches a URL via HTTP GET, returns response body as text
+  - `readFile(path)` — reads a file from the local filesystem
+  - `writeFile(path, content)` — writes content to a file
+- **Isolation** — code runs in a fresh V8 isolate per request with no direct Node.js API access. Network access is limited to `httpGet()` with blocked private/local hosts.
 
 ### `src/llm-runner.ts`
 
@@ -341,6 +344,17 @@ Not all steps need the full coding model. Planning and compaction are text-only 
 This reduces latency and memory usage on auxiliary steps while preserving code quality where it matters. The fast model uses a smaller context window (16k vs 32k) since it handles shorter inputs.
 
 **Setup:** Pull the fast model with `ollama pull qwen3:8b`. Both models are configured in `src/llm-runner.ts` (`MODEL` and `MODEL_FAST` constants).
+
+### v17: httpGet() tool
+
+Added `httpGet(url)` as a new sandbox tool, allowing the agent to directly fetch URLs without relying on Puppeteer-based web search. This unlocks tasks like fetching HTML, calling REST APIs, and downloading JSON data.
+
+**Implementation:** Uses Node's native `fetch` with a 15-second timeout and a 50k character response cap. Follows the same `Reference` + `applySyncPromise` pattern as other sandbox tools.
+
+**Security:** Blocks access to private networks and cloud metadata endpoints:
+- localhost, 127.0.0.1, 0.0.0.0, [::1]
+- Private IP ranges (10.x, 172.16-31.x, 192.168.x)
+- Cloud metadata (169.254.169.254, metadata.google.internal)
 
 ### Code review findings
 

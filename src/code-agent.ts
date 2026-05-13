@@ -151,6 +151,7 @@ const SANDBOX_TOOLS = [
   { signature: "log(msg: string): void", description: "prints a message (captured in Observation)" },
   { signature: "finalAnswer(value: any): void", description: "returns the final result and stops execution" },
   { signature: "webSearch(query: string): string", description: "searches the web via Google, returns summarized results" },
+  { signature: "httpGet(url: string): string", description: "fetches a URL via HTTP GET and returns the response body as text" },
   { signature: "readFile(path: string): string", description: "reads a file from the local filesystem and returns its contents" },
   { signature: "writeFile(path: string, content: string): string", description: "writes content to a file, returns 'ok' on success" },
 ];
@@ -182,10 +183,10 @@ Rules:
 - After calling webSearch(), log the result and STOP. Do NOT process or interpret search results in the same code block. Wait for the Observation, then use the results in the next step.
 - NEVER hardcode or assume data. Always use the actual results returned by webSearch().
 - NEVER simulate or imagine Observation outputs. Only the system provides Observations. Write one Thought and one code block, then stop.
-- Do NOT use require(), import, fetch, or Node.js APIs — only pure TS + the sandbox APIs above.
+- Do NOT use require(), import, fetch, or Node.js APIs — only pure TS + the sandbox APIs above. Use httpGet() for direct URL fetching.
 - When asked to read or analyze files, use readFile() to get the content, then explain it in finalAnswer(). Do NOT execute file contents as code.
 - NEVER fabricate, recall, or reconstruct data from your training knowledge. If a task requires information, you MUST use webSearch() or readFile() to obtain it. If you cannot obtain the data through available tools, call finalAnswer() explaining what you cannot do and why.
-- If a task is impossible with the available tools (e.g., making HTTP requests, accessing APIs, executing shell commands), do NOT invent a workaround or fake the output. Instead, call finalAnswer() explaining the limitation.
+- If a task is impossible with the available tools (e.g., executing shell commands, accessing databases), do NOT invent a workaround or fake the output. Instead, call finalAnswer() explaining the limitation.
 - Don't give up on tasks that ARE possible. Solve the task, don't just describe how.
 
 Here are examples using the available tools:

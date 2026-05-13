@@ -56,6 +56,30 @@ async function webSearch(query: string): Promise<string> {
   }
 }
 
+// --- HTTP GET ---
+
+const BLOCKED_HOSTS = ["localhost", "127.0.0.1", "0.0.0.0", "[::1]", "metadata.google.internal", "169.254.169.254"];
+
+async function httpGet(url: string): Promise<string> {
+  console.log(`[httpGet] url: "${url}"`);
+  try {
+    const parsed = new URL(url);
+    if (BLOCKED_HOSTS.includes(parsed.hostname) || /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/.test(parsed.hostname)) {
+      return `Error: access to ${parsed.hostname} is blocked for security reasons.`;
+    }
+    const response = await fetch(url, {
+      headers: { "User-Agent": "CodeAgent/1.0" },
+      signal: AbortSignal.timeout(15000),
+    });
+    const text = await response.text();
+    console.log(`[httpGet] ${response.status} — ${text.length} chars`);
+    return text.slice(0, 50000);
+  } catch (e: any) {
+    console.log(`[httpGet] error: ${e.message}`);
+    return `HTTP error: ${e.message}`;
+  }
+}
+
 import ts from "typescript";
 
 // --- Type declarations for sandbox globals ---
@@ -64,6 +88,7 @@ const SANDBOX_DECLARATIONS = `
 declare function log(msg: string): void;
 declare function finalAnswer(value: any): void;
 declare function webSearch(query: string): string;
+declare function httpGet(url: string): string;
 declare function readFile(path: string): string;
 declare function writeFile(path: string, content: string): string;
 `;
@@ -133,6 +158,10 @@ async function executeCode(code: string, { timeout = 60000, memoryLimit = 8 } = 
       return new ivm.ExternalCopy(await webSearch(query)).copyInto();
     }));
 
+    context.global.setSync("_httpGetRef", new ivm.Reference(async (url: string) => {
+      return new ivm.ExternalCopy(await httpGet(url)).copyInto();
+    }));
+
     context.global.setSync("_readFileRef", new ivm.Reference(async (path: string) => {
       const content = fs.readFileSync(path, "utf-8");
       return new ivm.ExternalCopy(content).copyInto();
@@ -143,10 +172,13 @@ async function executeCode(code: string, { timeout = 60000, memoryLimit = 8 } = 
       return new ivm.ExternalCopy("ok").copyInto();
     }));
 
-    // Bootstrap: define webSearch(), readFile(), writeFile() in the isolate using applySyncPromise
+    // Bootstrap: define webSearch(), httpGet(), readFile(), writeFile() in the isolate using applySyncPromise
     context.evalSync(`
       function webSearch(query) {
         return _webSearchRef.applySyncPromise(undefined, [query]);
+      }
+      function httpGet(url) {
+        return _httpGetRef.applySyncPromise(undefined, [url]);
       }
       function readFile(path) {
         return _readFileRef.applySyncPromise(undefined, [path]);
