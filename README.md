@@ -356,6 +356,14 @@ Added `httpGet(url)` as a new sandbox tool, allowing the agent to directly fetch
 - Private IP ranges (10.x, 172.16-31.x, 192.168.x)
 - Cloud metadata (169.254.169.254, metadata.google.internal)
 
+### v17b: Tool failure fabrication guard
+
+Testing revealed that when a tool call failed (e.g., `readFile("x.ts")` returning "file not found"), the agent would fabricate a hypothetical file and explain that instead of reporting the error. The error guidance message "try a fundamentally different approach" was being interpreted as license to invent sample data.
+
+**Fix:** Two changes:
+1. New rule: "If a tool call fails, report the failure in finalAnswer(). Do NOT invent sample data, create hypothetical content, or guess what the result might have been."
+2. Revised error observation text: changed from "try a fundamentally different approach" (encouraged creative workarounds) to "report the failure via finalAnswer(). Only retry if you can fix the underlying issue."
+
 ### v18: Security hardening and performance fixes
 
 A second review pass focused on security, resource management, and robustness:

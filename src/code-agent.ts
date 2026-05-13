@@ -186,6 +186,7 @@ Rules:
 - Do NOT use require(), import, fetch, or Node.js APIs — only pure TS + the sandbox APIs above. Use httpGet() for direct URL fetching.
 - When asked to read or analyze files, use readFile() to get the content, then explain it in finalAnswer(). Do NOT execute file contents as code.
 - NEVER fabricate, recall, or reconstruct data from your training knowledge. If a task requires information, you MUST use webSearch() or readFile() to obtain it. If you cannot obtain the data through available tools, call finalAnswer() explaining what you cannot do and why.
+- If a tool call fails (e.g., file not found, HTTP error), report the failure in finalAnswer(). Do NOT invent sample data, create hypothetical content, or guess what the result might have been.
 - If a task is impossible with the available tools (e.g., executing shell commands, accessing databases), do NOT invent a workaround or fake the output. Instead, call finalAnswer() explaining the limitation.
 - Don't give up on tasks that ARE possible. Solve the task, don't just describe how.
 
@@ -423,7 +424,7 @@ async function runCodeAgent(task: string, reset = true, plan = false): Promise<v
     const logs = result.output?.join("\n") || "";
     const rawObservation = result.success
       ? `${logs}${result.result != null ? "\nResult: " + result.result : ""}`
-      : `Error: ${result.error}\n${logs}\nThis failed. Avoid repeating the same mistake — if this has failed before, try a fundamentally different approach.`;
+      : `Error: ${result.error}\n${logs}\nIf this error indicates the task cannot be completed (e.g., file not found, resource unavailable), report the failure via finalAnswer(). Only retry if you can fix the underlying issue.`;
 
     const observation = truncateObservation(rawObservation);
     console.log(chalk.gray("Observation:"), observation);
